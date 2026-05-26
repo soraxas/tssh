@@ -25,16 +25,42 @@ tssh builds against the patched tsshd.
 
 ## Install
 
-Pre-built binaries are attached to each GitHub release. Pick the archive
-matching your OS/arch and drop both `tssh` and `tsshd` somewhere on `$PATH`:
+Pre-built binaries are attached to each GitHub release. Each `tssh_VERSION_OS_ARCH`
+archive contains **both** `tssh` and `tsshd` so installing one gets you the matching
+pair.
 
 ```sh
 # example: Linux x86_64
 TAG=$(curl -s https://api.github.com/repos/soraxas/tssh/releases/latest | grep tag_name | cut -d'"' -f4)
-curl -L -o tssh.tar.gz   "https://github.com/soraxas/tssh/releases/download/${TAG}/tssh_${TAG#v}_linux_x86_64.tar.gz"
-curl -L -o tsshd.tar.gz  "https://github.com/soraxas/tssh/releases/download/${TAG}/tsshd_${TAG#v}_linux_x86_64.tar.gz"
-tar -xzf tssh.tar.gz && sudo mv tssh*/tssh /usr/local/bin/
-tar -xzf tsshd.tar.gz && sudo mv tsshd*/tsshd /usr/local/bin/
+curl -L -o tssh.tar.gz "https://github.com/soraxas/tssh/releases/download/${TAG}/tssh_${TAG#v}_linux_x86_64.tar.gz"
+tar -xzf tssh.tar.gz
+sudo install -m 0755 tssh_*/{tssh,tsshd} /usr/local/bin/
+```
+
+### mise
+
+```sh
+mise use ubi:soraxas/tssh
+```
+
+The combined archive layout means `mise` pulls one asset per platform and finds
+both binaries inside. To pin a version:
+
+```toml
+# mise.toml
+[tools]
+"ubi:soraxas/tssh" = "0.1.0"
+```
+
+### Linux packages
+
+Per-binary `.deb` and `.rpm` packages are also attached to each release for
+people who only want one of the two:
+
+```sh
+# tssh only
+curl -LO "https://github.com/soraxas/tssh/releases/download/${TAG}/tssh_${TAG#v}_linux_x86_64.deb"
+sudo dpkg -i tssh_${TAG#v}_linux_x86_64.deb
 ```
 
 The latest dev build of `master` is also published under the `dev` release
