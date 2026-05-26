@@ -33,7 +33,7 @@ jobs:
 
       - name: Show checksums
         run: |
-          sha256sum dist/*.tar.gz dist/*.zip dist/*_checksums.txt 2>/dev/null || true
+          sha256sum dist/*.tar.gz dist/*.zip dist/*.rpm dist/*.deb dist/*_checksums.txt 2>/dev/null || true
 
       - name: Update dev release
         uses: marvinpinto/action-automatic-releases@latest
@@ -45,4 +45,6 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.rpm
+            dist/*.deb
             dist/*_checksums.txt

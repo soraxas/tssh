@@ -1,5 +1,9 @@
 project_name: tssh-patched
 
+# Build matrix mirrors upstream trzsz-ssh / tsshd (.goreleaser.yaml).
+# tssh targets one extra GOOS (android/arm64) that tsshd does not -- tsshd
+# is a server, android doesn't make sense for it.
+
 builds:
   - id: tssh
     main: ./cmd/tssh
@@ -13,25 +17,44 @@ builds:
       - -s -w
     goos:
       - linux
-      - darwin
       - windows
+      - darwin
+      - android
       - freebsd
     goarch:
-      - amd64
-      - arm64
       - "386"
+      - amd64
       - arm
+      - arm64
+      - loong64
     goarm:
+      - "6"
       - "7"
     ignore:
       - goos: windows
         goarch: arm
       - goos: darwin
+        goarch: arm
+      - goos: darwin
         goarch: "386"
       - goos: darwin
+        goarch: loong64
+      - goos: android
         goarch: arm
+      - goos: android
+        goarch: "386"
+      - goos: android
+        goarch: amd64
+      - goos: android
+        goarch: loong64
       - goos: freebsd
         goarch: arm
+      - goos: freebsd
+        goarch: "386"
+      - goos: freebsd
+        goarch: loong64
+      - goos: windows
+        goarch: loong64
 
   - id: tsshd
     main: ./cmd/tsshd
@@ -45,25 +68,35 @@ builds:
       - -s -w
     goos:
       - linux
-      - darwin
       - windows
+      - darwin
       - freebsd
     goarch:
-      - amd64
-      - arm64
       - "386"
+      - amd64
       - arm
+      - arm64
+      - loong64
     goarm:
+      - "6"
       - "7"
     ignore:
       - goos: windows
         goarch: arm
       - goos: darwin
+        goarch: arm
+      - goos: darwin
         goarch: "386"
       - goos: darwin
-        goarch: arm
+        goarch: loong64
       - goos: freebsd
         goarch: arm
+      - goos: freebsd
+        goarch: "386"
+      - goos: freebsd
+        goarch: loong64
+      - goos: windows
+        goarch: loong64
 
 archives:
   - id: tssh
@@ -83,6 +116,8 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+    files:
+      - none*
 
   - id: tsshd
     builds:
@@ -101,6 +136,66 @@ archives:
     format_overrides:
       - goos: windows
         format: zip
+    files:
+      - none*
+
+# nfpms automatically filters to Linux builds -- the .rpm/.deb files are
+# only produced for linux/{amd64,386,arm,arm64,loong64}.
+nfpms:
+  - id: tssh
+    package_name: tssh
+    builds:
+      - tssh
+    section: net
+    file_name_template: >-
+      tssh_
+      {{- .Version }}_
+      {{- if eq .Os "darwin" }}macos_
+      {{- else }}{{ .Os }}_{{ end }}
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else if eq .Arch "arm64" }}aarch64
+      {{- else if eq .Arch "arm" }}armv{{ .Arm }}
+      {{- else }}{{ .Arch }}{{ end }}
+    homepage: https://github.com/soraxas/tssh
+    maintainer: Tin Lai <tin@tinyiu.com>
+    description: |
+      tssh -- patched fork of trzsz-ssh with STUN-based UDP hole punching.
+    license: MIT
+    formats:
+      - rpm
+      - deb
+    bindir: /usr/bin
+    rpm:
+      group: Unspecified
+
+  - id: tsshd
+    package_name: tsshd
+    builds:
+      - tsshd
+    section: net
+    file_name_template: >-
+      tsshd_
+      {{- .Version }}_
+      {{- if eq .Os "darwin" }}macos_
+      {{- else }}{{ .Os }}_{{ end }}
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else if eq .Arch "arm64" }}aarch64
+      {{- else if eq .Arch "arm" }}armv{{ .Arm }}
+      {{- else }}{{ .Arch }}{{ end }}
+    homepage: https://github.com/soraxas/tssh
+    maintainer: Tin Lai <tin@tinyiu.com>
+    description: |
+      tsshd -- patched UDP-based SSH server with PTY-fd leak fix and STUN
+      hole-punching support.
+    license: MIT
+    formats:
+      - rpm
+      - deb
+    bindir: /usr/bin
+    rpm:
+      group: Unspecified
 
 snapshot:
   name_template: "{{ .Version }}.next"
