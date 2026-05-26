@@ -1,0 +1,29 @@
+name: Go test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build all packages (uses go.work)
+        run: go build ./trzsz-ssh/... ./tsshd/...
+
+      - name: Test patched packages
+        # Only the packages we actually changed -- upstream's full test
+        # suite has GUI/terminal-dependent tests that don't fit a CI box.
+        run: |
+          go test -count=1 -timeout=180s ./tsshd/tsshd/...
+          go test -count=1 -timeout=180s ./trzsz-ssh/tssh/...

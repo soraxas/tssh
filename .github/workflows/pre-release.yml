@@ -1,0 +1,48 @@
+name: Auto deploy dev build
+
+on:
+  push:
+    branches: ["master", "main"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-pre-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Drop local dev tag if it exists
+        run: git tag -d dev || true
+
+      - name: Run GoReleaser (snapshot)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v1"
+          args: release --clean --snapshot --skip=publish
+
+      - name: Show checksums
+        run: |
+          sha256sum dist/*.tar.gz dist/*.zip dist/*_checksums.txt 2>/dev/null || true
+
+      - name: Update dev release
+        uses: marvinpinto/action-automatic-releases@latest
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "dev"
+          prerelease: true
+          title: "Development build (master branch)"
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*_checksums.txt
