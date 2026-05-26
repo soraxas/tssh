@@ -98,6 +98,51 @@ func (u *udpServerConn) Consume(consumeFn func([]byte) error) error {
 	}
 }
 
+// unconnectedUdpServerConn wraps a bound (but not connected) *net.UDPConn
+// together with a target peer address. It is used for the UDP hole-punching
+// flow: the caller binds the socket, runs STUN on it, and the same socket is
+// then handed off here for the live transport so the NAT mapping established
+// during STUN is preserved. Reads filter out packets that don't come from the
+// intended peer (e.g. straggler STUN replies or stray scans).
+type unconnectedUdpServerConn struct {
+	conn  *net.UDPConn
+	raddr *net.UDPAddr
+}
+
+func (u *unconnectedUdpServerConn) Close() error {
+	return u.conn.Close()
+}
+
+func (u *unconnectedUdpServerConn) Write(buf []byte) error {
+	_, err := u.conn.WriteToUDP(buf, u.raddr)
+	return err
+}
+
+func (u *unconnectedUdpServerConn) Read(buf []byte) (int, error) {
+	for {
+		n, src, err := u.conn.ReadFromUDP(buf)
+		if err != nil {
+			return n, err
+		}
+		if src.Port == u.raddr.Port && src.IP.Equal(u.raddr.IP) {
+			return n, nil
+		}
+	}
+}
+
+func (u *unconnectedUdpServerConn) Consume(consumeFn func([]byte) error) error {
+	buffer := make([]byte, 0xffff)
+	for {
+		n, err := u.Read(buffer)
+		if err != nil {
+			return err
+		}
+		if err := consumeFn(buffer[:n]); err != nil {
+			return err
+		}
+	}
+}
+
 type serverConnHolder struct {
 	PacketConn
 }
@@ -123,6 +168,17 @@ type clientProxy struct {
 	kcpCrypto     *rotatingCrypto
 	serverChecker *timeoutChecker
 	closed        atomic.Bool
+	// localPort, when non-zero, forces net.DialUDP to bind to this local
+	// source port. Set when UDP hole punching is enabled so the dialed
+	// socket reuses the NAT mapping established by the prior STUN socket.
+	localPort uint16
+	// localConn, when non-nil, is the pre-bound (and STUN'd) UDP socket for
+	// hole punching. renewUdpPath consumes it on the first call -- after
+	// that we either reuse the wrapper still in backendConn or, on a true
+	// reconnect, fall back to DialUDP. Closing this socket gives up the
+	// punched NAT mapping, which is acceptable: by the time a reconnect
+	// fires, the mapping has likely expired anyway.
+	localConn *net.UDPConn
 }
 
 func (p *clientProxy) renewTransportPath(proxyClient *SshUdpClient, connectTimeout time.Duration) error {
@@ -260,14 +316,31 @@ func (p *clientProxy) renewUdpPath(proxyClient *SshUdpClient, connectTimeout tim
 		if err != nil {
 			return nil, fmt.Errorf("resolve udp addr [%s] [%s] failed: %v", p.serverNet, p.serverAddr, err)
 		}
-		udpConn, err := net.DialUDP("udp", nil, serverAddr)
-		if err != nil {
-			return nil, fmt.Errorf("dial [%s] [%s] failed: %v", p.serverNet, p.serverAddr, err)
+		// Hole punch path: consume the pre-bound STUN socket on first use.
+		// Keeping the original socket open is what makes the punched NAT
+		// mapping survive into the live transport -- DialUDP'ing a fresh
+		// socket here would burn the mapping on NATs that drop it the
+		// moment the socket closes.
+		if udpConn := p.localConn; udpConn != nil {
+			p.localConn = nil
+			setDSCP(udpConn, kProxyDSCP)
+			_ = udpConn.SetReadBuffer(kProxyBufferSize)
+			_ = udpConn.SetWriteBuffer(kProxyBufferSize)
+			conn = &serverConnHolder{&unconnectedUdpServerConn{conn: udpConn, raddr: serverAddr}}
+		} else {
+			var laddr *net.UDPAddr
+			if p.localPort != 0 {
+				laddr = &net.UDPAddr{Port: int(p.localPort)}
+			}
+			udpConn, err := net.DialUDP("udp", laddr, serverAddr)
+			if err != nil {
+				return nil, fmt.Errorf("dial [%s] [%s] failed: %v", p.serverNet, p.serverAddr, err)
+			}
+			setDSCP(udpConn, kProxyDSCP)
+			_ = udpConn.SetReadBuffer(kProxyBufferSize)
+			_ = udpConn.SetWriteBuffer(kProxyBufferSize)
+			conn = &serverConnHolder{&udpServerConn{udpConn}}
 		}
-		setDSCP(udpConn, kProxyDSCP)
-		_ = udpConn.SetReadBuffer(kProxyBufferSize)
-		_ = udpConn.SetWriteBuffer(kProxyBufferSize)
-		conn = &serverConnHolder{&udpServerConn{udpConn}}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
@@ -573,6 +646,8 @@ func startClientProxy(client *SshUdpClient, opts *UdpClientOptions) (*clientProx
 		clientID:      clientID,
 		serverID:      opts.ServerInfo.ServerID,
 		serverChecker: newTimeoutChecker(opts.HeartbeatTimeout),
+		localPort:     opts.LocalPort,
+		localConn:     opts.LocalConn,
 	}
 	proxy.backendCond = sync.NewCond(&proxy.backendMutex)
 

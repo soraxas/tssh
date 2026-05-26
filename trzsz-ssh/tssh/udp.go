@@ -42,6 +42,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// holePunchSetup captures the result of client-side STUN before tsshd is
+// launched. conn is the still-open *net.UDPConn used for STUN -- handed
+// off intact to the UDP transport so the NAT mapping established for the
+// STUN exchange (and advertised to tsshd as publicEndpoint) survives into
+// the live connection. Closing it discards the punched mapping.
+type holePunchSetup struct {
+	conn           *net.UDPConn
+	publicEndpoint string
+}
+
 const kDefaultUdpAliveTimeout = 24 * time.Hour
 
 const kDefaultUdpHeartbeatTimeout = 3 * time.Second
@@ -265,6 +275,34 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		}
 	}
 
+	// hole punching: must run BEFORE building the tsshd command so we can
+	// pass the client's public endpoint as a --punch argument. Skipped when
+	// a proxy is configured (proxy hop owns leg 1's UDP transport) or when
+	// UDP-over-TCP is selected (no UDP socket to STUN against).
+	var punch *holePunchSetup
+	if isHolePunchEnabled(args) {
+		switch {
+		case param.proxy != nil:
+			warning("ignoring --punch: hole punching is not supported through a proxy jump")
+		case strings.ToLower(getExOptionConfig(args, "UdpProxyMode")) == "tcp":
+			warning("ignoring --punch: hole punching requires UDP transport (UdpProxyMode=tcp is set)")
+		default:
+			var err error
+			punch, err = setupHolePunch(args)
+			if err != nil {
+				return nil, fmt.Errorf("udp login to [%s] hole punch setup failed: %v", args.Destination, err)
+			}
+		}
+	}
+	// If anything below fails before we hand the socket off to tsshd's
+	// UDP client, close it so we don't leak the fd or hold the local port.
+	punchHandedOff := false
+	defer func() {
+		if punch != nil && !punchHandedOff {
+			_ = punch.conn.Close()
+		}
+	}()
+
 	// start tsshd
 	attachMode := false
 	tsshdPath := getTsshdPath(args)
@@ -288,13 +326,26 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	} else {
 		tsshdCmdBuf = getTsshdCommand(param, tsshdPath, mtu, connectTimeout)
 	}
+	if punch != nil {
+		fmt.Fprintf(tsshdCmdBuf, " --punch %s", punch.publicEndpoint)
+		if host := getExOptionConfig(args, "UdpStunHost"); host != "" {
+			fmt.Fprintf(tsshdCmdBuf, " --stun-host %s", host)
+		}
+		if port := getExOptionConfig(args, "UdpStunPort"); port != "" {
+			fmt.Fprintf(tsshdCmdBuf, " --stun-port %s", port)
+		}
+	}
 	tsshdCmd := tsshdCmdBuf.String()
 	debug("udp login to [%s] tsshd command: %s", args.Destination, tsshdCmd)
 
+	debug("udp login to [%s] waiting for tsshd to start and report ServerInfo...", args.Destination)
+	tsshdStart := time.Now()
 	serverInfo, err := startTsshdServer(args, tcpClient, tsshdCmd)
 	if err != nil {
 		return nil, fmt.Errorf("udp login to [%s] start tsshd on remote failed: %v", args.Destination, err)
 	}
+	debug("udp login to [%s] tsshd ready after %v: port=%d publicAddr=%q mode=%s",
+		args.Destination, time.Since(tsshdStart), serverInfo.Port, serverInfo.PublicAddr, serverInfo.Mode)
 
 	// udp config
 	if globalUdpAliveTimeout == 0 {
@@ -319,6 +370,12 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		attachMode:       attachMode,
 	}
 	tsshdAddr := joinHostPort(param.host, strconv.Itoa(serverInfo.Port))
+	if punch != nil && serverInfo.PublicAddr != "" {
+		debug("udp login to [%s] using punched endpoint: %s (was %s)", args.Destination, serverInfo.PublicAddr, tsshdAddr)
+		tsshdAddr = serverInfo.PublicAddr
+	} else if punch != nil {
+		warning("hole punch requested but tsshd did not report a public endpoint; falling back to direct address")
+	}
 	clientOpts := &tsshd.UdpClientOptions{
 		EnableDebugging:  enableDebugLogging,
 		EnableWarning:    enableWarningLogging,
@@ -336,6 +393,16 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		QuitCallback:     func(reason string) { quitCallback(args.Destination, reason) },
 		DiscardCallback:  handleTmuxDiscardedInput,
 	}
+	if punch != nil {
+		clientOpts.LocalConn = punch.conn
+		if la, ok := punch.conn.LocalAddr().(*net.UDPAddr); ok {
+			// On a transport renew after the punched socket has been
+			// closed, fall back to dialing fresh on the same local port.
+			// The NAT mapping may already be gone, but reusing the port
+			// is harmless and slightly better than picking a random one.
+			clientOpts.LocalPort = uint16(la.Port)
+		}
+	}
 
 	if param.proxy != nil {
 		clientOpts.ProxyClient = proxyClient.SshUdpClient
@@ -344,11 +411,16 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		debug("udp login to [%s] tsshd server addr: %s", param.args.Destination, tsshdAddr)
 	}
 
+	debug("udp login to [%s] dialing tsshd at [%s] (timeout %v)", args.Destination, tsshdAddr, connectTimeout)
+	dialStart := time.Now()
 	udpClient.SshUdpClient, err = tsshd.NewSshUdpClient(clientOpts)
 	if err != nil {
-		return nil, fmt.Errorf("udp login to [%s] failed: %v", args.Destination, err)
+		return nil, fmt.Errorf("udp login to [%s] failed after %v: %v", args.Destination, time.Since(dialStart), err)
 	}
-	debug("udp login to [%s] success", args.Destination)
+	// Ownership of the punched socket is now inside SshUdpClient -- its
+	// lifecycle (close on transport renew or shutdown) takes over.
+	punchHandedOff = true
+	debug("udp login to [%s] success after %v", args.Destination, time.Since(dialStart))
 
 	lastJumpUdpClient = udpClient
 
@@ -651,8 +723,55 @@ func getUdpMode(args *sshArgs) udpModeType {
 		warning("unknown UdpMode %s", udpMode)
 	}
 
-	if args.UDP || args.Attach {
+	if args.UDP || args.Attach || args.Punch {
 		return kUdpModeYes
 	}
 	return kUdpModeNo
+}
+
+func isHolePunchEnabled(args *sshArgs) bool {
+	if args.Punch {
+		return true
+	}
+	return strings.ToLower(getExOptionConfig(args, "UdpHolePunch")) == "yes"
+}
+
+// setupHolePunch binds a local UDP socket and runs STUN to learn the public
+// endpoint. The socket is left OPEN -- closing it would burn the NAT mapping
+// on routers that drop the mapping on socket close. The caller is responsible
+// for handing the conn to the UDP transport (or closing it on failure).
+func setupHolePunch(args *sshArgs) (*holePunchSetup, error) {
+	stunConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return nil, fmt.Errorf("bind stun socket: %v", err)
+	}
+
+	localAddr, ok := stunConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = stunConn.Close()
+		return nil, fmt.Errorf("stun socket LocalAddr is %T, not *net.UDPAddr", stunConn.LocalAddr())
+	}
+
+	stunHost := getExOptionConfig(args, "UdpStunHost")
+	var stunPort int
+	if p := getExOptionConfig(args, "UdpStunPort"); p != "" {
+		if v, err := strconv.ParseUint(p, 10, 16); err != nil {
+			warning("UdpStunPort [%s] invalid: %v", p, err)
+		} else {
+			stunPort = int(v)
+		}
+	}
+
+	publicIP, publicPort, err := tsshd.StunDiscover(stunConn, stunHost, stunPort)
+	if err != nil {
+		_ = stunConn.Close()
+		return nil, fmt.Errorf("stun: %v", err)
+	}
+
+	endpoint := net.JoinHostPort(publicIP, strconv.Itoa(publicPort))
+	debug("hole punch: client public endpoint %s (local port %d)", endpoint, localAddr.Port)
+	return &holePunchSetup{
+		conn:           stunConn,
+		publicEndpoint: endpoint,
+	}, nil
 }

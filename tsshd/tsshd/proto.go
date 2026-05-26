@@ -91,6 +91,10 @@ type ServerInfo struct {
 	ServerID   uint64 `json:",omitempty"`
 	ProxyMode  string `json:",omitempty"`
 	MTU        uint16 `json:",omitempty"`
+	// PublicAddr is the server's STUN-discovered public UDP endpoint
+	// ("host:port"). Set only when --punch was passed; the client should
+	// dial this instead of the SSH host when hole punching.
+	PublicAddr string `json:",omitempty"`
 }
 
 type SessionInfo struct {

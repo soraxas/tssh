@@ -106,6 +106,19 @@ type UdpClientOptions struct {
 	WarningFunc      func(string)
 	QuitCallback     func(reason string)
 	DiscardCallback  func(discarded []byte)
+	// LocalPort, when non-zero, forces the UDP transport to use this local
+	// source port. Used as a fallback for hole punching when LocalConn is
+	// not supplied; the caller would have bound, STUN'd, and closed a socket
+	// on this port and expects the dial to reuse the same NAT mapping.
+	LocalPort uint16
+	// LocalConn, when non-nil, is a pre-bound *net.UDPConn that the UDP
+	// transport will use directly (without DialUDP) for the initial
+	// connection. This is the correct path for hole punching: the caller
+	// runs STUN on this exact socket and hands it off here without ever
+	// closing it, so the NAT mapping advertised to the peer stays valid.
+	// On reconnect after the conn is closed, the transport falls back to
+	// LocalPort + DialUDP.
+	LocalConn *net.UDPConn
 }
 
 // NewSshUdpClient creates a SshUdpClient

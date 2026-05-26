@@ -81,12 +81,19 @@ type tsshdArgs struct {
 	MTU            uint16
 	Port           string
 	ConnectTimeout time.Duration
+	// Hole punching: when Punch is set, the server STUNs its UDP socket
+	// to learn its public endpoint (advertised back in ServerInfo) and
+	// continuously sends UDP packets to Punch to open a NAT mapping.
+	Punch    string // "host:port" of the client's public UDP endpoint
+	StunHost string
+	StunPort int
 }
 
 func printHelp() int {
 	fmt.Printf("usage: tsshd [-h|-v|-V] [--kcp] [--tcp] [--ipv4] [--ipv6] [--debug] " +
 		"[--attachable] [--socket] [--list] [--view <PID>.<SID>] [--attach <PID>] " +
-		"[--mtu N] [--port low-high] [--connect-timeout t]\n\n" +
+		"[--mtu N] [--port low-high] [--connect-timeout t] " +
+		"[--punch host:port] [--stun-host host] [--stun-port port]\n\n" +
 		"tsshd: A UDP-based SSH server with seamless roaming and auto-reconnect.\n\n" +
 		"optional arguments:\n" +
 		"  -h, --help             show this help message and exit\n" +
@@ -104,7 +111,11 @@ func printHelp() int {
 		"  --attach <PID>         Attach to tsshd session specified by PID\n" +
 		"  --mtu N                Sets the Maximum Transmission Unit (MTU)\n" +
 		"  --port low-high        UDP port range that the tsshd listens on\n" +
-		"  --connect-timeout t    The timeout for tssh connecting to tsshd\n")
+		"  --connect-timeout t    The timeout for tssh connecting to tsshd\n" +
+		"  --punch host:port      Client's public UDP endpoint; STUN this socket\n" +
+		"                         and punch toward host:port (UDP hole punching)\n" +
+		"  --stun-host host       STUN server host (default stun.l.google.com)\n" +
+		"  --stun-port port       STUN server port (default 19302)\n")
 	return 0
 }
 
@@ -160,6 +171,23 @@ func parseTsshdArgs() *tsshdArgs {
 			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
 				if timeout, err := strconv.ParseUint(os.Args[i+1], 10, 32); err == nil {
 					args.ConnectTimeout = time.Duration(timeout) * time.Second
+				}
+				i++
+			}
+		case "--punch":
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				args.Punch = os.Args[i+1]
+				i++
+			}
+		case "--stun-host":
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				args.StunHost = os.Args[i+1]
+				i++
+			}
+		case "--stun-port":
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				if port, err := strconv.ParseUint(os.Args[i+1], 10, 16); err == nil {
+					args.StunPort = int(port)
 				}
 				i++
 			}
@@ -323,6 +351,18 @@ func RunMain(opts ...Option) (int, error) {
 	})
 
 	_ = os.Stdout.Close()
+
+	// Detach inherited stdin/stderr so the SSH session can fully close.
+	// The parent process forked us via background(); when it exited we got
+	// orphaned to init, but we still hold the parent's stdin/stderr fds.
+	// On a PTY-allocated SSH session those are the slave fds, and keeping
+	// them open prevents the PTY master from seeing EOF -- some SSH server
+	// proxies (e.g. Coder's) block session.Wait() on the client side until
+	// the master closes. Closing fds 0 and 2 here drops our reference so
+	// the slave can close. Post-startup messages already only go to the
+	// debug log file, so we lose nothing.
+	_ = os.Stdin.Close()
+	_ = os.Stderr.Close()
 
 	// start background liveness watchdog
 	go monitorServerLiveness(args)

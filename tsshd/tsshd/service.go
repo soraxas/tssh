@@ -131,6 +131,12 @@ func initServer(args *tsshdArgs) (*ServerInfo, string, error) {
 		MTU:       args.MTU,
 	}
 
+	if args.Punch != "" {
+		if err := doHolePunch(args, conn, info); err != nil {
+			warning("hole punch setup failed: %v", err)
+		}
+	}
+
 	proxy, err := startServerProxy(args, info, conn)
 	if err != nil {
 		return nil, "", err
