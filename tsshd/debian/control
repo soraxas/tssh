@@ -1,0 +1,15 @@
+Source: tsshd
+Section: net
+Priority: optional
+Maintainer: Lonny Wong <lonnywong@qq.com>
+Build-Depends: debhelper (>=9),
+               golang-1.25-go
+Standards-Version: 3.9.6
+Homepage: https://trzsz.github.io/tsshd
+Vcs-Browser: https://github.com/trzsz/tsshd
+Vcs-Git: https://github.com/trzsz/tsshd.git
+
+Package: tsshd
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: tsshd is a UDP-based SSH server with seamless roaming and auto-reconnect.

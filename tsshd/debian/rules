@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+export CGO_ENABLED=0
+
+export HOME=$(CURDIR)/.debian-home
+export GOCACHE=$(HOME)/.cache/go-build
+export GOPATH=$(HOME)/go
+
+override_dh_auto_configure:
+	mkdir -p $(HOME)
+
+%:
+	PATH="/usr/lib/go-1.25/bin:${PATH}" dh $@
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf $(HOME)
+
+override_dh_auto_test:
+	true
