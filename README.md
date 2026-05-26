@@ -46,16 +46,23 @@ This is a multi-module Go workspace. The repo-root `go.work` is required —
 without it, the patched `tssh` resolves to the published `tsshd` module
 (without `--punch`) and fails to compile.
 
+If you have [`just`](https://github.com/casey/just):
+
+```sh
+just build              # → ./bin/tssh and ./bin/tsshd
+just test               # run the patched test suites
+just install            # install to ~/.local/bin (override with PREFIX=)
+just deploy-tsshd HOST  # rsync sources to HOST and rebuild tsshd there
+just --list             # see all recipes
+```
+
+Or plain `go`:
+
 ```sh
 git clone https://github.com/soraxas/tssh
 cd tssh
 go build -o bin/tssh  ./trzsz-ssh/cmd/tssh
 go build -o bin/tsshd ./tsshd/cmd/tsshd
-```
-
-Tests:
-
-```sh
 go test ./trzsz-ssh/tssh/... ./tsshd/tsshd/...
 ```
 
