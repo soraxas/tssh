@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/soraxas/git-subrepo-rs
+;
+[subrepo]
+	remote = https://github.com/trzsz/trzsz-ssh
+	branch = main
+	commit = 6ffd76175fd674074d07ca9ea2d7be58b6515f7c
+	parent = 1c26431432a3f463f923d642210d71d31b0c8801
+	method = merge
+	cmdver = 0.0.1

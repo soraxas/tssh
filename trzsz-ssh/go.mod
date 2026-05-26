@@ -1,0 +1,83 @@
+module github.com/trzsz/trzsz-ssh
+
+go 1.25.0
+
+require (
+	charm.land/bubbles/v2 v2.1.0
+	charm.land/bubbletea/v2 v2.0.6
+	charm.land/lipgloss/v2 v2.0.3
+	github.com/Microsoft/go-winio v0.6.2
+	github.com/charmbracelet/colorprofile v0.4.3
+	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/chzyer/readline v1.5.1
+	github.com/creack/pty v1.1.24
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
+	github.com/google/uuid v1.6.0
+	github.com/jcmturner/gokrb5/v8 v8.4.4
+	github.com/mattn/go-isatty v0.0.22
+	github.com/mattn/go-runewidth v0.0.23
+	github.com/mitchellh/go-homedir v1.1.0
+	github.com/pquerna/otp v1.5.0
+	github.com/quic-go/quic-go v0.59.1
+	github.com/skeema/knownhosts v1.3.2
+	github.com/stretchr/testify v1.11.1
+	github.com/trzsz/go-arg v1.5.4
+	github.com/trzsz/go-socks5 v0.1.1
+	github.com/trzsz/iterm2 v0.2.1
+	github.com/trzsz/pageant v0.1.1
+	github.com/trzsz/promptui v0.10.8
+	github.com/trzsz/shellescape v1.6.0
+	github.com/trzsz/ssh_config v1.3.8
+	github.com/trzsz/trzsz-go v1.2.1-0.20260410165008-9be4a4a9e14b
+	github.com/trzsz/tsshd v0.1.9-0.20260523153943-fabbb77bea4c
+	golang.org/x/crypto v0.52.1-0.20260522023950-e5306b2f3e96
+	golang.org/x/sys v0.45.0
+	golang.org/x/term v0.43.0
+)
+
+require (
+	github.com/UserExistsError/conpty v0.1.4 // indirect
+	github.com/akavel/rsrc v0.10.2 // indirect
+	github.com/alexflint/go-scalar v1.2.0 // indirect
+	github.com/andybrewer/mack v0.0.0-20251024001139-afd410b36447 // indirect
+	github.com/atotto/clipboard v0.1.4 // indirect
+	github.com/boombuler/barcode v1.1.0 // indirect
+	github.com/charmbracelet/ultraviolet v0.0.0-20260511121909-c840852527f3 // indirect
+	github.com/charmbracelet/x/term v0.2.2 // indirect
+	github.com/charmbracelet/x/termios v0.1.1 // indirect
+	github.com/charmbracelet/x/windows v0.2.2 // indirect
+	github.com/clipperhouse/displaywidth v0.11.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dchest/jsmin v1.0.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/hashicorp/go-uuid v1.0.3 // indirect
+	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
+	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
+	github.com/jcmturner/gofork v1.7.6 // indirect
+	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
+	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
+	github.com/josephspurrier/goversioninfo v1.7.0 // indirect
+	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
+	github.com/klauspost/reedsolomon v1.14.0 // indirect
+	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
+	github.com/muesli/cancelreader v0.2.2 // indirect
+	github.com/ncruces/zenity v0.10.14 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/randall77/makefat v0.0.0-20260406194835-1b91746796b7 // indirect
+	github.com/rcarmo/go-te v0.1.0 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/tjfoc/gmsm v1.4.1 // indirect
+	github.com/trzsz/smux v1.6.0 // indirect
+	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/xtaci/kcp-go/v5 v5.6.72 // indirect
+	golang.org/x/image v0.41.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
