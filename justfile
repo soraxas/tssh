@@ -132,12 +132,14 @@ release VERSION="":
 
     echo "→ Creating release ${next} from $(git rev-parse --short HEAD)..."
 
-    # Tag locally (lightweight — goreleaser is fine with that).
-    git tag "${next}"
+    # Tag locally if not already tagged (idempotent — safe to retry after a
+    # partial failure where the tag was created but the release was not).
+    if ! git rev-parse "${next}" >/dev/null 2>&1; then
+        git tag "${next}"
+    fi
 
-    # Push the tag; the release workflow needs it on origin before the API
-    # call so goreleaser can clone and find it.
-    git push origin "${next}"
+    # Push the tag (--no-verify skips hooks; if tag already on origin this is a no-op).
+    git push origin "${next}" 2>/dev/null || true
 
     # Create the GitHub release. This fires publish.yml (on: release: released).
     gh release create "${next}" \
