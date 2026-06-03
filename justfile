@@ -78,3 +78,72 @@ deploy-tsshd HOST:
 # Remove build artifacts
 clean:
     rm -rf {{OUT_DIR}} dist
+
+# ---------------------------------------------------------------------------
+# Release helpers
+# ---------------------------------------------------------------------------
+
+# Show the latest release tag and what the next minor bump would be.
+version-next:
+    #!/usr/bin/env bash
+    git fetch --tags -q
+    latest=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.' | head -1)
+    [[ -z "${latest}" ]] && latest=$(git tag --sort=-version:refname | grep -E '^v[0-9]+$' | head -1)
+    [[ -z "${latest}" ]] && latest="v0.0"
+    ver="${latest#v}"; major="${ver%%.*}"; minor="${ver#*.}"; minor="${minor%%.*}"
+    [[ "${minor}" =~ ^[0-9]+$ ]] || minor=0
+    echo "latest : ${latest}"
+    echo "next   : v${major}.$((minor + 1))  (minor bump)"
+
+# Bump the minor version, create a signed(-ish) tag, push, and publish a
+# GitHub release. The release triggers publish.yml which runs goreleaser and
+# uploads cross-platform binaries.
+#
+# Usage:
+#   just release           # auto-bump minor: v0.2 → v0.3
+#   just release v0.5      # exact version
+#
+# Requires: gh CLI authenticated, clean working tree, push access to origin.
+release VERSION="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Guard: require clean tree so the tag captures a known state.
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "error: working tree is dirty — commit or stash changes first" >&2
+        exit 1
+    fi
+
+    # Fetch tags so the bump sees the current state of origin.
+    git fetch --tags -q
+
+    # Determine the tag to create.
+    if [[ -n "{{VERSION}}" ]]; then
+        next="{{VERSION}}"
+        [[ "${next}" != v* ]] && next="v${next}"
+    else
+        latest=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.' | head -1)
+        [[ -z "${latest}" ]] && latest=$(git tag --sort=-version:refname | grep -E '^v[0-9]+$' | head -1)
+        [[ -z "${latest}" ]] && latest="v0.0"
+        ver="${latest#v}"; major="${ver%%.*}"; minor="${ver#*.}"; minor="${minor%%.*}"
+        [[ "${minor}" =~ ^[0-9]+$ ]] || minor=0
+        next="v${major}.$((minor + 1))"
+    fi
+
+    echo "→ Creating release ${next} from $(git rev-parse --short HEAD)..."
+
+    # Tag locally (lightweight — goreleaser is fine with that).
+    git tag "${next}"
+
+    # Push the tag; the release workflow needs it on origin before the API
+    # call so goreleaser can clone and find it.
+    git push origin "${next}"
+
+    # Create the GitHub release. This fires publish.yml (on: release: released).
+    gh release create "${next}" \
+        --title "Release ${next}" \
+        --generate-notes \
+        --latest
+
+    echo "✓ ${next} published."
+    echo "  Watch Actions: https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/actions"
