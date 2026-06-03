@@ -254,7 +254,7 @@ func runConsole(escapeChar byte, writer io.WriteCloser, sshConn *sshConnection) 
 		model.items = append(model.items, &menuItem{"r", getText("console/repunch"), func() (tea.Model, tea.Cmd) {
 			go func() {
 				<-quitted
-				if err := udpClient.triggerRepunch(); err != nil {
+				if err := udpClient.triggerRepunch(false); err != nil {
 					return
 				}
 			}()

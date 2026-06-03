@@ -259,6 +259,9 @@ func readSecret(prompt string) (secret []byte, err error) {
 }
 
 func getPasswordAuthMethod(param *sshParam) ssh.AuthMethod {
+	if param.nonInteractive {
+		return nil
+	}
 	if strings.ToLower(getOptionConfig(param.args, "PasswordAuthentication")) == "no" {
 		debug("disable auth method: password authentication")
 		return nil
@@ -334,6 +337,9 @@ func readQuestionAnswerConfig(param *sshParam, idx int, question string) string 
 }
 
 func getKeyboardInteractiveAuthMethod(param *sshParam) ssh.AuthMethod {
+	if param.nonInteractive {
+		return nil
+	}
 	if strings.ToLower(getOptionConfig(param.args, "KbdInteractiveAuthentication")) == "no" {
 		debug("disable auth method: keyboard interactive authentication")
 		return nil

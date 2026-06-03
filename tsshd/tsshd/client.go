@@ -476,6 +476,12 @@ func (c *SshUdpClient) GetLastActiveTime() int64 {
 	return c.activeChecker.getAliveTime()
 }
 
+// IsHeartbeatTimeout returns true when the transport heartbeat has timed out,
+// meaning no two-way activity has been confirmed within the heartbeat window.
+func (c *SshUdpClient) IsHeartbeatTimeout() bool {
+	return c.activeChecker.isTimeout()
+}
+
 // GetLastReconnectError returns the last error encountered during reconnection attempts
 func (c *SshUdpClient) GetLastReconnectError() error {
 	client := c

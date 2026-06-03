@@ -61,6 +61,10 @@ type sshParam struct {
 	udpMode udpModeType
 	ipv4    bool
 	ipv6    bool
+	// nonInteractive skips password and keyboard-interactive auth so that
+	// background auto-repunch never prompts the user. Set to true for the
+	// automated retry path; leave false for the manual ~r path.
+	nonInteractive bool
 }
 
 func (p *sshParam) setNetworkAddressFamily(conn net.Conn) {

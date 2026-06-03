@@ -97,11 +97,12 @@ type sshUdpClient struct {
 	// client across suspend: that connection has almost certainly died
 	// silently while the laptop was closed, so reusing it would hang or
 	// error -- repunch dials a fresh one each time instead.
-	punchUsed     bool
-	serverPid     int
-	punchParam    *sshParam
-	repunchMutex  sync.Mutex
-	transportMode string // "KCP" or "QUIC" from serverInfo.Mode
+	punchUsed        bool
+	serverPid        int
+	punchParam       *sshParam
+	repunchMutex     sync.Mutex
+	repunchFailedAuth atomic.Bool // set when auth required; stops auto-repunch
+	transportMode    string // "KCP" or "QUIC" from serverInfo.Mode
 }
 
 type detachableWriter struct {
@@ -184,18 +185,35 @@ func (c *sshUdpClient) debug(format string, a ...any) {
 	writeDebugLog(time.Now().UnixMilli(), c.sshDestName, msg)
 }
 
-// triggerRepunch is invoked by the escape-console "r" key when --punch is
-// active and the underlying NAT mapping likely died (typically after a
-// laptop suspend/resume). It re-STUNs the client, opens a fresh SSH/TCP
-// session to run `tsshd --repunch`, and hands the freshly bound socket
-// back to the UDP transport so the next renew uses it.
+// errRepunchAuthRequired is returned by triggerRepunch when the SSH dial
+// fails because no non-interactive auth method succeeded. Callers that
+// want to distinguish "network down, retry later" from "need credentials,
+// give up" can check with errors.Is(err, errRepunchAuthRequired).
+var errRepunchAuthRequired = fmt.Errorf("repunch: SSH auth requires interactive credentials")
+
+// isRepunchAuthError returns true when err signals that SSH auth failed
+// due to missing or rejected credentials (not a transient network error).
+func isRepunchAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "unable to authenticate") ||
+		strings.Contains(s, "permission denied") ||
+		strings.Contains(s, "no supported methods")
+}
+
+// triggerRepunch re-STUNs the client, opens a fresh SSH/TCP session to run
+// `tsshd --repunch`, and injects the new STUN'd socket into the UDP
+// transport so the next renewTransportPath uses it.
 //
-// A fresh SSH dial is required (rather than reusing the original TCP
-// client) because that connection has almost certainly silently died
-// during suspend -- which is the exact case the user invokes repunch
-// to recover from. If the user's auth method is keyboard-interactive
-// they will see a password prompt; pubkey + agent auth is seamless.
-func (c *sshUdpClient) triggerRepunch() error {
+// nonInteractive=true skips password and keyboard-interactive auth so the
+// call is safe to make from background goroutines. If no non-interactive
+// method succeeds, it returns errRepunchAuthRequired.
+//
+// nonInteractive=false (manual ~r) keeps interactive auth; pubkey+agent is
+// seamless and keyboard-interactive/password prompts are shown to the user.
+func (c *sshUdpClient) triggerRepunch(nonInteractive bool) error {
 	if !c.punchUsed {
 		return fmt.Errorf("hole punching is not active for this session")
 	}
@@ -206,14 +224,17 @@ func (c *sshUdpClient) triggerRepunch() error {
 		return fmt.Errorf("tsshd pid unknown; repunch unsupported by this server version")
 	}
 
-	// Serialise concurrent repunch attempts -- a user mashing the key
-	// should not start two STUN runs racing for the same renewMutex.
+	// Serialise concurrent repunch attempts.
 	c.repunchMutex.Lock()
 	defer c.repunchMutex.Unlock()
 
-	step := func(msg string) { fmt.Fprintf(os.Stderr, "\r\n\033[0;36m[repunch]\033[0m %s", msg) }
+	prefix := "[repunch]"
+	if nonInteractive {
+		prefix = "[auto-repunch]"
+	}
+	step := func(msg string) { fmt.Fprintf(os.Stderr, "\r\n\033[0;36m%s\033[0m %s", prefix, msg) }
 	fail := func(label string, err error) error {
-		fmt.Fprintf(os.Stderr, "\r\n\033[0;31m[repunch] FAILED at %s: %v\033[0m\r\n", label, err)
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;31m%s FAILED at %s: %v\033[0m\r\n", prefix, label, err)
 		return err
 	}
 
@@ -225,9 +246,15 @@ func (c *sshUdpClient) triggerRepunch() error {
 	step(fmt.Sprintf("client public endpoint: %s", punch.publicEndpoint))
 
 	step("dialing SSH/TCP to reach tsshd socket...")
-	tcpClient, err := tcpLogin(c.punchParam, nil, kUdpModeNo)
+	// Build a modified param that skips interactive auth for the auto path.
+	loginParam := *c.punchParam
+	loginParam.nonInteractive = nonInteractive
+	tcpClient, err := tcpLogin(&loginParam, nil, kUdpModeNo)
 	if err != nil {
 		_ = punch.conn.Close()
+		if nonInteractive && isRepunchAuthError(err) {
+			return errRepunchAuthRequired
+		}
 		return fail("re-dial SSH", fmt.Errorf("re-dial SSH failed: %v", err))
 	}
 	defer func() { _ = tcpClient.Close() }()
@@ -280,6 +307,13 @@ func (c *sshUdpClient) isReconnectTimeout() bool {
 }
 
 func (c *sshUdpClient) udpKeepAlive() {
+	// autoRepunchInFlight prevents concurrent auto-repunch goroutines from
+	// stacking up on repunchMutex when intervalTime << repunch duration.
+	var autoRepunchInFlight atomic.Bool
+	// nextAutoRepunch tracks the next time an auto-repunch attempt is allowed
+	// (simple backoff: try every ~10s while transport is offline).
+	var nextAutoRepunch time.Time
+
 	for !c.IsClosed() {
 		if c.sshConn.Load() != nil && time.Since(time.UnixMilli(c.GetLastActiveTime())) > c.aliveTimeout {
 			c.debug("alive timeout for %v", c.aliveTimeout)
@@ -289,6 +323,30 @@ func (c *sshUdpClient) udpKeepAlive() {
 
 		if isTerminal && c.sshConn.Load() != nil && enableWarningLogging && c.isReconnectTimeout() {
 			go c.notifyConnectionLost()
+		}
+
+		// Auto-repunch: when punch is active and transport is offline,
+		// retry in the background every 10s until auth is required or
+		// the transport recovers. Does not prompt — uses non-interactive
+		// auth only. Retries survive transient network-down periods so
+		// recovery happens as soon as wifi/VPN comes back.
+		if c.punchUsed && c.SshUdpClient.IsHeartbeatTimeout() &&
+			!c.repunchFailedAuth.Load() &&
+			!autoRepunchInFlight.Load() &&
+			time.Now().After(nextAutoRepunch) {
+			nextAutoRepunch = time.Now().Add(10 * time.Second)
+			autoRepunchInFlight.Store(true)
+			go func() {
+				defer autoRepunchInFlight.Store(false)
+				if err := c.triggerRepunch(true); err != nil {
+					if err == errRepunchAuthRequired {
+						c.repunchFailedAuth.Store(true)
+						warning("auto-repunch disabled: SSH auth requires interactive credentials; use ~r to repunch manually")
+					}
+					// Other errors (STUN/network/SSH) are transient — the
+					// loop retries after nextAutoRepunch elapses.
+				}
+			}()
 		}
 
 		time.Sleep(c.intervalTime)
