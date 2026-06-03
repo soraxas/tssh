@@ -86,7 +86,7 @@ clean:
 # Show the latest release tag and what the next minor bump would be.
 version-next:
     #!/usr/bin/env bash
-    git fetch --tags -q
+    git fetch --tags --force -q 2>/dev/null || true
     latest=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.' | head -1)
     [[ -z "${latest}" ]] && latest=$(git tag --sort=-version:refname | grep -E '^v[0-9]+$' | head -1)
     [[ -z "${latest}" ]] && latest="v0.0"
@@ -115,7 +115,7 @@ release VERSION="":
     fi
 
     # Fetch tags so the bump sees the current state of origin.
-    git fetch --tags -q
+    git fetch --tags --force -q 2>/dev/null || true
 
     # Determine the tag to create.
     if [[ -n "{{VERSION}}" ]]; then
