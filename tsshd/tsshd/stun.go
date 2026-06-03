@@ -30,6 +30,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -158,6 +159,19 @@ func StunDiscover(conn net.PacketConn, stunHost string, stunPort int) (string, i
 	return "", 0, fmt.Errorf("no stun response from [%s]:%d", stunHost, stunPort)
 }
 
+// punchState retains the bits of the initial hole-punch setup that a later
+// repunch needs: the stun-discovered UDP socket and a cancel handle for the
+// currently-running runPunchLoop. Set once by doHolePunch and re-used by
+// retargetHolePunch. The mutex serialises retargets so two concurrent
+// repunch RPCs don't leave dangling loops.
+type punchState struct {
+	mu     sync.Mutex
+	conn   *net.UDPConn
+	cancel chan struct{}
+}
+
+var globalPunchState punchState
+
 // doHolePunch STUNs the server's UDP socket and starts a goroutine sending
 // punch packets to the client's public endpoint to open a NAT mapping.
 // Must be called before startServerProxy so the proxy doesn't race STUN reads.
@@ -197,14 +211,58 @@ func doHolePunch(args *tsshdArgs, fconn frontendConnection, info *ServerInfo) er
 	// until the real client traffic arrives. The proxy will drop these packets
 	// on the client side (they're not auth packets) -- they exist only to make
 	// the NAT translate; the actual handshake races them.
-	go runPunchLoop(stunConn, clientAddr)
+	cancel := make(chan struct{})
+	globalPunchState.mu.Lock()
+	globalPunchState.conn = stunConn
+	globalPunchState.cancel = cancel
+	globalPunchState.mu.Unlock()
+	go runPunchLoop(stunConn, clientAddr, cancel)
 	return nil
 }
 
-func runPunchLoop(conn *net.UDPConn, peer *net.UDPAddr) {
+// retargetHolePunch redirects the punch loop at a new client public endpoint
+// after the client has re-STUNed (typically after a laptop suspend/resume
+// trashed the NAT mapping). It stops any still-running loop from the prior
+// target and starts a new one. The server does NOT re-STUN -- the server's
+// proxy is already reading from stunConn, so a STUN reply would race those
+// reads and likely be eaten. The server's PublicAddr therefore stays as it
+// was, which matches what the client is already dialing.
+//
+// Assumption: the server's NAT is endpoint-independent (or port-preserving)
+// so the external port for stunConn is stable across the suspend window.
+// On symmetric NATs or NATs that have GC'd the mapping, the external port
+// may have changed and the client will keep dialing a stale PublicAddr.
+// If that becomes a problem, we'd need a way to safely re-STUN the running
+// socket -- likely by pausing proxy reads behind a mutex during STUN.
+func retargetHolePunch(newClientEndpoint string) error {
+	clientAddr, err := net.ResolveUDPAddr("udp", newClientEndpoint)
+	if err != nil {
+		return fmt.Errorf("resolve repunch target [%s]: %w", newClientEndpoint, err)
+	}
+
+	globalPunchState.mu.Lock()
+	defer globalPunchState.mu.Unlock()
+	if globalPunchState.conn == nil {
+		return fmt.Errorf("hole punch was not initialised; tsshd must be started with --punch")
+	}
+
+	// Stop the previous loop (a no-op if it has already self-terminated past
+	// its 30s window) before starting the new one.
+	if globalPunchState.cancel != nil {
+		close(globalPunchState.cancel)
+	}
+	cancel := make(chan struct{})
+	globalPunchState.cancel = cancel
+	go runPunchLoop(globalPunchState.conn, clientAddr, cancel)
+	debug("repunch: punch loop retargeted at %s", clientAddr.String())
+	return nil
+}
+
+func runPunchLoop(conn *net.UDPConn, peer *net.UDPAddr, cancel <-chan struct{}) {
 	// Short-lived: most NAT mappings establish within a few seconds. After
 	// 30s the real client should be sending QUIC/KCP packets which themselves
-	// refresh the mapping, so we can stop.
+	// refresh the mapping, so we can stop. cancel allows a repunch to
+	// preempt this loop before the deadline.
 	deadline := time.Now().Add(30 * time.Second)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -214,6 +272,10 @@ func runPunchLoop(conn *net.UDPConn, peer *net.UDPAddr) {
 			debug("hole punch write failed: %v", err)
 			return
 		}
-		<-ticker.C
+		select {
+		case <-ticker.C:
+		case <-cancel:
+			return
+		}
 	}
 }

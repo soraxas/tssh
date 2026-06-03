@@ -129,6 +129,7 @@ func initServer(args *tsshdArgs) (*ServerInfo, string, error) {
 		ServerVer: kTsshdVersion,
 		Port:      port,
 		MTU:       args.MTU,
+		Pid:       os.Getpid(),
 	}
 
 	if args.Punch != "" {

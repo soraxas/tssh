@@ -90,6 +90,18 @@ type sshUdpClient struct {
 	sshDestName      string
 	attachMode       bool
 	sshConn          atomic.Pointer[sshConnection]
+	// punchUsed, serverPid, and punchParam are populated when --punch was
+	// active so the user-triggered repunch can re-STUN, open a fresh SSH
+	// session to run `tsshd --repunch`, and inject the new socket back
+	// into the UDP transport. We do NOT retain the original TCP/SSH
+	// client across suspend: that connection has almost certainly died
+	// silently while the laptop was closed, so reusing it would hang or
+	// error -- repunch dials a fresh one each time instead.
+	punchUsed     bool
+	serverPid     int
+	punchParam    *sshParam
+	repunchMutex  sync.Mutex
+	transportMode string // "KCP" or "QUIC" from serverInfo.Mode
 }
 
 type detachableWriter struct {
@@ -172,6 +184,97 @@ func (c *sshUdpClient) debug(format string, a ...any) {
 	writeDebugLog(time.Now().UnixMilli(), c.sshDestName, msg)
 }
 
+// triggerRepunch is invoked by the escape-console "r" key when --punch is
+// active and the underlying NAT mapping likely died (typically after a
+// laptop suspend/resume). It re-STUNs the client, opens a fresh SSH/TCP
+// session to run `tsshd --repunch`, and hands the freshly bound socket
+// back to the UDP transport so the next renew uses it.
+//
+// A fresh SSH dial is required (rather than reusing the original TCP
+// client) because that connection has almost certainly silently died
+// during suspend -- which is the exact case the user invokes repunch
+// to recover from. If the user's auth method is keyboard-interactive
+// they will see a password prompt; pubkey + agent auth is seamless.
+func (c *sshUdpClient) triggerRepunch() error {
+	if !c.punchUsed {
+		return fmt.Errorf("hole punching is not active for this session")
+	}
+	if c.punchParam == nil {
+		return fmt.Errorf("no retained SSH params for repunch")
+	}
+	if c.serverPid == 0 {
+		return fmt.Errorf("tsshd pid unknown; repunch unsupported by this server version")
+	}
+
+	// Serialise concurrent repunch attempts -- a user mashing the key
+	// should not start two STUN runs racing for the same renewMutex.
+	c.repunchMutex.Lock()
+	defer c.repunchMutex.Unlock()
+
+	step := func(msg string) { fmt.Fprintf(os.Stderr, "\r\n\033[0;36m[repunch]\033[0m %s", msg) }
+	fail := func(label string, err error) error {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;31m[repunch] FAILED at %s: %v\033[0m\r\n", label, err)
+		return err
+	}
+
+	step("STUNing to discover new client public endpoint...")
+	punch, err := setupHolePunch(c.punchParam.args)
+	if err != nil {
+		return fail("re-STUN", fmt.Errorf("re-STUN failed: %v", err))
+	}
+	step(fmt.Sprintf("client public endpoint: %s", punch.publicEndpoint))
+
+	step("dialing SSH/TCP to reach tsshd socket...")
+	tcpClient, err := tcpLogin(c.punchParam, nil, kUdpModeNo)
+	if err != nil {
+		_ = punch.conn.Close()
+		return fail("re-dial SSH", fmt.Errorf("re-dial SSH failed: %v", err))
+	}
+	defer func() { _ = tcpClient.Close() }()
+
+	tsshdPath := getTsshdPath(c.punchParam.args)
+	cmd := fmt.Sprintf(" --repunch %d --punch %s", c.serverPid, punch.publicEndpoint)
+	step(fmt.Sprintf("running: tsshd%s", cmd))
+	output, err := execTsshdCommand(tcpClient, tsshdPath, cmd)
+	if err != nil {
+		_ = punch.conn.Close()
+		return fail("tsshd --repunch", fmt.Errorf("run tsshd --repunch failed: %v", err))
+	}
+	outputStr := strings.TrimSpace(string(output))
+	step(fmt.Sprintf("server response: %q", outputStr))
+	if !bytes.HasPrefix(bytes.TrimSpace(output), []byte("OK")) {
+		_ = punch.conn.Close()
+		return fail("server repunch", fmt.Errorf("tsshd repunch error: %s", outputStr))
+	}
+
+	step("injecting new socket into UDP transport and kicking reconnect...")
+	if err := c.SshUdpClient.RefreshHolePunch(punch.conn); err != nil {
+		_ = punch.conn.Close()
+		return fail("RefreshHolePunch", fmt.Errorf("refresh local hole-punch socket failed: %v", err))
+	}
+	step("socket injected — monitoring reconnect...\r\n")
+
+	go func() {
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(time.Second)
+			if time.Since(time.UnixMilli(c.SshUdpClient.GetLastActiveTime())) < c.reconnectTimeout {
+				fmt.Fprintf(os.Stderr, "\r\n\033[0;32m[repunch] transport reconnected!\033[0m\r\n")
+				return
+			}
+			if err := c.SshUdpClient.GetLastReconnectError(); err != nil {
+				fmt.Fprintf(os.Stderr, "\r\033[0;33m[repunch] reconnect attempt failed: %v\033[0m\x1b[K", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "\r\033[0;36m[repunch] waiting... (last active %v ago)\033[0m\x1b[K",
+					time.Since(time.UnixMilli(c.SshUdpClient.GetLastActiveTime())).Round(time.Second))
+			}
+		}
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;31m[repunch] timed out waiting for reconnect after 30s\033[0m\r\n")
+	}()
+
+	return nil
+}
+
 func (c *sshUdpClient) isReconnectTimeout() bool {
 	return time.Since(time.UnixMilli(c.GetLastActiveTime())) > c.reconnectTimeout
 }
@@ -193,8 +296,16 @@ func (c *sshUdpClient) udpKeepAlive() {
 }
 
 func (c *sshUdpClient) getConnLostStatus() string {
-	return fmt.Sprintf("Oops, looks like the connection to the server was lost, trying to reconnect for %d/%d seconds.",
+	base := fmt.Sprintf("Oops, looks like the connection to the server was lost, trying to reconnect for %d/%d seconds.",
 		time.Since(time.UnixMilli(c.GetLastActiveTime()))/time.Second, c.aliveTimeout/time.Second)
+	if c.punchUsed {
+		// Hint appears only when --punch is active. The escape char is
+		// usually '~' (configurable via EscapeChar); the hint references
+		// the default since chasing the live value here would require
+		// threading another field down from stdio setup.
+		base += " Press <ENTER>~r to re-punch."
+	}
+	return base
 }
 
 func (c *sshUdpClient) notifyConnectionLost() {
@@ -309,6 +420,11 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 	connectTimeout := getConnectTimeout(args)
 	sessionName := getExOptionConfig(args, "UdpSessionName")
 	var tsshdCmdBuf *strings.Builder
+	// freshSession is true when tsshdCmdBuf will launch a brand-new tsshd
+	// rather than attach to one already running. Used below to force
+	// --attachable --socket when --punch is set, so the unix socket exists
+	// for later repunch RPCs after the SSH control channel has closed.
+	freshSession := false
 	if args.Attach || strings.ToLower(getExOptionConfig(args, "UdpSessionAttach")) == "yes" {
 		var err error
 		tsshdCmdBuf, err = attachToSession(tcpClient, tsshdPath, sessionName)
@@ -321,12 +437,17 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		if tsshdCmdBuf == nil {
 			tsshdCmdBuf = getTsshdCommand(param, tsshdPath, mtu, connectTimeout)
 			tsshdCmdBuf.WriteString(" --attachable --socket")
+			freshSession = true
 		}
 		attachMode = true
 	} else {
 		tsshdCmdBuf = getTsshdCommand(param, tsshdPath, mtu, connectTimeout)
+		freshSession = true
 	}
 	if punch != nil {
+		if freshSession && !strings.Contains(tsshdCmdBuf.String(), " --attachable") {
+			tsshdCmdBuf.WriteString(" --attachable --socket")
+		}
 		fmt.Fprintf(tsshdCmdBuf, " --punch %s", punch.publicEndpoint)
 		if host := getExOptionConfig(args, "UdpStunHost"); host != "" {
 			fmt.Fprintf(tsshdCmdBuf, " --stun-host %s", host)
@@ -368,6 +489,12 @@ func udpLogin(param *sshParam, tcpClient SshClient) (SshClient, error) {
 		reconnectTimeout: reconnectTimeout,
 		sshDestName:      args.Destination,
 		attachMode:       attachMode,
+		punchUsed:        punch != nil,
+		serverPid:        serverInfo.Pid,
+		transportMode:    serverInfo.Mode,
+	}
+	if punch != nil {
+		udpClient.punchParam = param
 	}
 	tsshdAddr := joinHostPort(param.host, strconv.Itoa(serverInfo.Port))
 	if punch != nil && serverInfo.PublicAddr != "" {

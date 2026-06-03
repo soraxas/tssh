@@ -100,6 +100,8 @@ func handleSocketConn(conn net.Conn) {
 		err = handleViewRequest(conn)
 	case "attach":
 		err = handleAttachRequest(conn)
+	case "repunch":
+		err = handleRepunchRequest(conn)
 	default:
 		debug("socket unknown command: %s", cmd)
 	}
@@ -174,6 +176,25 @@ func handleViewRequest(conn net.Conn) error {
 		}
 	}
 
+	return nil
+}
+
+func handleRepunchRequest(conn net.Conn) error {
+	var msg repunchMessage
+	if err := recvMessage(conn, &msg); err != nil {
+		return fmt.Errorf("recv repunch request failed: %v", err)
+	}
+
+	if err := retargetHolePunch(msg.ClientEndpoint); err != nil {
+		if _, werr := fmt.Fprintf(conn, "ERROR: %v\r\n", err); werr != nil {
+			return fmt.Errorf("write repunch error response failed: %v", werr)
+		}
+		return nil
+	}
+
+	if _, err := fmt.Fprint(conn, "OK\r\n"); err != nil {
+		return fmt.Errorf("write repunch response failed: %v", err)
+	}
 	return nil
 }
 
@@ -298,6 +319,52 @@ func handleViewCommand(pidAndSid string) (int, error) {
 		return kExitCodeViewFailed, fmt.Errorf("copy view response failed: %v", err)
 	}
 
+	return 0, nil
+}
+
+// handleRepunchCommand runs on the remote as a transient `tsshd --repunch`
+// process spawned over a fresh SSH session by the client after re-STUN. It
+// dials the unix socket of the still-running tsshd identified by pidStr and
+// hands off the client's new public endpoint so the punch loop can be
+// retargeted without re-establishing the UDP control channel.
+func handleRepunchCommand(pidStr, clientEndpoint string) (int, error) {
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return kExitCodeRepunchFailed, fmt.Errorf("invalid repunch target [%s], expected <pid>: %v", pidStr, err)
+	}
+	if clientEndpoint == "" {
+		return kExitCodeRepunchFailed, fmt.Errorf("repunch requires --punch <host:port> with the new client endpoint")
+	}
+
+	path, err := getSocketPath(pid)
+	if err != nil {
+		return kExitCodeRepunchFailed, err
+	}
+
+	conn, err := connectSocket(path)
+	if err != nil {
+		return kExitCodeRepunchFailed, fmt.Errorf("connect socket [%s] failed: %v", path, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if err := conn.SetDeadline(time.Now().Add(kSocketTimeout)); err != nil {
+		return kExitCodeRepunchFailed, fmt.Errorf("set repunch deadline failed: %v", err)
+	}
+
+	if err := sendCommandAndMessage(conn, "repunch", &repunchMessage{ClientEndpoint: clientEndpoint}); err != nil {
+		return kExitCodeRepunchFailed, fmt.Errorf("send repunch request failed: %v", err)
+	}
+
+	buf, err := io.ReadAll(conn)
+	if err != nil {
+		return kExitCodeRepunchFailed, fmt.Errorf("read repunch response failed: %v", err)
+	}
+	if _, err := os.Stdout.Write(buf); err != nil {
+		return kExitCodeRepunchFailed, fmt.Errorf("write repunch response failed: %v", err)
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(buf)), "ERROR:") {
+		return kExitCodeRepunchFailed, nil
+	}
 	return 0, nil
 }
 

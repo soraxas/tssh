@@ -51,8 +51,10 @@ type menuModel struct {
 	menuWidth       int
 	screenWidth     int
 	quitting        bool
+	connInfo        string
 	backgroundStyle lipgloss.Style
 	titleStyle      lipgloss.Style
+	connInfoStyle   lipgloss.Style
 	footerStyle     lipgloss.Style
 	blankLineStyle  lipgloss.Style
 	separatorStyle  lipgloss.Style
@@ -76,6 +78,7 @@ func initMenuModel(menuWidth, screenWidth int) *menuModel {
 		screenWidth:     screenWidth,
 		backgroundStyle: lipgloss.NewStyle().Background(bgColor).Width(screenWidth).Align(lipgloss.Center),
 		titleStyle:      lipgloss.NewStyle().Foreground(titleColor).Background(bgColor).Bold(true).Width(menuWidth).Align(lipgloss.Center),
+		connInfoStyle:   lipgloss.NewStyle().Foreground(footerColor).Background(bgColor).Italic(true).Width(menuWidth).Align(lipgloss.Center),
 		footerStyle:     lipgloss.NewStyle().Foreground(footerColor).Background(bgColor).Width(menuWidth).Align(lipgloss.Center),
 		blankLineStyle:  lipgloss.NewStyle().Background(bgColor).Width(menuWidth),
 		separatorStyle:  lipgloss.NewStyle().Foreground(separatorColor).Background(bgColor).Width(menuWidth),
@@ -128,6 +131,9 @@ func (m *menuModel) View() tea.View {
 	var builder strings.Builder
 	m.writeLine(&builder, m.renderBlankLine())
 	m.writeLine(&builder, m.titleStyle.Render(getText("console/title")))
+	if m.connInfo != "" {
+		m.writeLine(&builder, m.connInfoStyle.Render(m.connInfo))
+	}
 	m.writeLine(&builder, m.renderBlankLine())
 	m.writeLine(&builder, m.renderSeparator())
 	m.renderMenuItems(&builder)
@@ -169,9 +175,24 @@ func (m *menuModel) renderSeparator() string {
 	return m.separatorStyle.Render(strings.Repeat("─", m.menuWidth))
 }
 
+func connInfoString(sshConn *sshConnection) string {
+	if udpClient, ok := sshConn.client.(*sshUdpClient); ok {
+		info := "UDP/" + udpClient.transportMode
+		if udpClient.punchUsed {
+			info += " + Hole Punch"
+		}
+		if udpClient.attachMode {
+			info += " (attached)"
+		}
+		return info
+	}
+	return "TCP"
+}
+
 func runConsole(escapeChar byte, writer io.WriteCloser, sshConn *sshConnection) {
 	width := sshConn.session.GetTerminalWidth()
 	model := initMenuModel(min(width, 60), width)
+	model.connInfo = connInfoString(sshConn)
 
 	var key, char string
 	if escapeChar <= 26 {
@@ -223,6 +244,19 @@ func runConsole(escapeChar byte, writer io.WriteCloser, sshConn *sshConnection) 
 			go func() {
 				<-quitted
 				sshConn.forceExit(kExitCodeConsoleKill, fmt.Sprintf("user action in the console or entering the escape sequence ( %sd )", char))
+			}()
+			model.quitting = true
+			return model, tea.Quit
+		}})
+	}
+
+	if udpClient, ok := sshConn.client.(*sshUdpClient); ok && udpClient.punchUsed {
+		model.items = append(model.items, &menuItem{"r", getText("console/repunch"), func() (tea.Model, tea.Cmd) {
+			go func() {
+				<-quitted
+				if err := udpClient.triggerRepunch(); err != nil {
+					return
+				}
 			}()
 			model.quitting = true
 			return model, tea.Quit

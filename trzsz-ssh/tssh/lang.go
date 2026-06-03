@@ -47,6 +47,7 @@ var english = map[string]string{
 	"console/suspend":   "Suspend the current SSH process ( ^Z : Ctrl + Z )",
 	"console/terminate": "Terminate the current SSH session ( . : Exit / Kill )",
 	"console/detach":    "Detach the current SSH session ( d : Detach )",
+	"console/repunch":   "Re-run UDP hole punching ( r : Re-punch after suspend )",
 	"console/notes":     "↑/↓/j/k Move • Enter Select • q Quit",
 }
 
@@ -67,6 +68,7 @@ var chinese = map[string]string{
 	"console/suspend":   "暂停当前 SSH 进程 ( ^Z : Ctrl + Z )",
 	"console/terminate": "退出当前 SSH 会话 ( . : Exit / Kill )",
 	"console/detach":    "分离当前 SSH 会话 ( d : Detach )",
+	"console/repunch":   "重新执行 UDP 打洞 ( r : 唤醒后重新打洞 )",
 	"console/notes":     "↑/↓/j/k 移动 • Enter 选择 • q 退出",
 }
 

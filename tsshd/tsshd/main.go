@@ -50,9 +50,10 @@ const (
 	kExitCodeAliveTimeout = 95
 	kExitCodeSignalKill   = 96
 	kExitCodeApplyOptions = 97
-	kExitCodeListFailed   = 98
-	kExitCodeViewFailed   = 99
-	kExitCodeAttachFailed = 100
+	kExitCodeListFailed    = 98
+	kExitCodeViewFailed    = 99
+	kExitCodeAttachFailed  = 100
+	kExitCodeRepunchFailed = 101
 )
 
 var exitChan = make(chan int, 1)
@@ -78,6 +79,7 @@ type tsshdArgs struct {
 	List           bool
 	View           string
 	Attach         string
+	Repunch        string // PID of the tsshd session to retarget; --punch carries the new client endpoint
 	MTU            uint16
 	Port           string
 	ConnectTimeout time.Duration
@@ -92,6 +94,7 @@ type tsshdArgs struct {
 func printHelp() int {
 	fmt.Printf("usage: tsshd [-h|-v|-V] [--kcp] [--tcp] [--ipv4] [--ipv6] [--debug] " +
 		"[--attachable] [--socket] [--list] [--view <PID>.<SID>] [--attach <PID>] " +
+		"[--repunch <PID> --punch host:port] " +
 		"[--mtu N] [--port low-high] [--connect-timeout t] " +
 		"[--punch host:port] [--stun-host host] [--stun-port port]\n\n" +
 		"tsshd: A UDP-based SSH server with seamless roaming and auto-reconnect.\n\n" +
@@ -109,6 +112,8 @@ func printHelp() int {
 		"  --list                 List all tsshd sessions for current user\n" +
 		"  --view <PID>.<SID>     Print the screen contents of the session\n" +
 		"  --attach <PID>         Attach to tsshd session specified by PID\n" +
+		"  --repunch <PID>        Retarget hole-punch of tsshd PID at the\n" +
+		"                         endpoint passed via --punch\n" +
 		"  --mtu N                Sets the Maximum Transmission Unit (MTU)\n" +
 		"  --port low-high        UDP port range that the tsshd listens on\n" +
 		"  --connect-timeout t    The timeout for tssh connecting to tsshd\n" +
@@ -153,6 +158,11 @@ func parseTsshdArgs() *tsshdArgs {
 		case "--attach":
 			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
 				args.Attach = os.Args[i+1]
+				i++
+			}
+		case "--repunch":
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				args.Repunch = os.Args[i+1]
 				i++
 			}
 		case "--mtu":
@@ -284,6 +294,9 @@ func RunMain(opts ...Option) (int, error) {
 	}
 	if args.Attach != "" {
 		return handleAttachCommand(args.Attach)
+	}
+	if args.Repunch != "" {
+		return handleRepunchCommand(args.Repunch, args.Punch)
 	}
 
 	parent, stdout, err := background()

@@ -95,6 +95,9 @@ type ServerInfo struct {
 	// ("host:port"). Set only when --punch was passed; the client should
 	// dial this instead of the SSH host when hole punching.
 	PublicAddr string `json:",omitempty"`
+	// Pid is the tsshd server process id. The client uses it to address
+	// repunch RPCs at the right session via the unix socket.
+	Pid int `json:",omitempty"`
 }
 
 type SessionInfo struct {
@@ -268,6 +271,13 @@ type rekeyMessage struct {
 
 type viewMessage struct {
 	ID uint64 `json:",omitempty"`
+}
+
+// repunchMessage carries the client's freshly STUN-discovered public
+// endpoint so the server-side punch loop can be retargeted. Sent over the
+// unix socket as the payload of the "repunch" command.
+type repunchMessage struct {
+	ClientEndpoint string `json:",omitempty"`
 }
 
 func writeAll(dst io.Writer, data []byte) error {

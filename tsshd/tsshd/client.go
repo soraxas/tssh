@@ -498,6 +498,33 @@ func (c *SshUdpClient) GetMaxDatagramSize() uint16 {
 	return c.protoClient.getUdpForwarder().conn.GetMaxDatagramSize()
 }
 
+// RefreshHolePunch swaps in a freshly STUN'd UDP socket for the next
+// transport-renewal cycle and immediately triggers a reconnect attempt.
+// Used by a client implementing repunch after the original NAT mapping
+// expired (typically across a laptop suspend). Any previously cached
+// socket is closed. Safe to call concurrently with an in-flight renew --
+// the swap waits for renewMutex and takes effect on the next renewUdpPath.
+func (c *SshUdpClient) RefreshHolePunch(conn *net.UDPConn) error {
+	if conn == nil {
+		return fmt.Errorf("refresh hole punch: conn is nil")
+	}
+	laddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return fmt.Errorf("refresh hole punch: LocalAddr is %T", conn.LocalAddr())
+	}
+	// Atomic swap — no mutex needed, so this never blocks even while
+	// renewTransportPath holds renewMutex for up to connectTimeout.
+	if old := c.clientProxy.localConn.Swap(conn); old != nil {
+		_ = old.Close()
+	}
+	c.clientProxy.localPort.Store(uint32(laddr.Port))
+
+	// Kick a reconnect goroutine so it runs immediately rather than waiting
+	// for the existing reconnect loop to wake from its inter-retry sleep.
+	go c.tryToReconnect()
+	return nil
+}
+
 func (c *SshUdpClient) tryToReconnect() {
 	c.reconnectMutex.Lock()
 	defer c.reconnectMutex.Unlock()
