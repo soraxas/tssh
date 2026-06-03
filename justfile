@@ -106,11 +106,11 @@ version-next:
 # Requires: gh CLI authenticated, clean working tree, push access to origin.
 release VERSION="":
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -xeuo pipefail
 
     # Guard: require clean tree so the tag captures a known state.
     if [[ -n "$(git status --porcelain)" ]]; then
-        echo "error: working tree is dirty — commit or stash changes first" >&2
+        echo "error: working tree is dirty — commit or stash changes first"
         exit 1
     fi
 
