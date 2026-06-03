@@ -534,3 +534,43 @@ func TestRefreshHolePunch_ConcurrentSafety(t *testing.T) {
 		_ = conn.Close()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestIsHeartbeatTimeout
+// ---------------------------------------------------------------------------
+
+// TestIsHeartbeatTimeout mirrors the contract of SshUdpClient.IsHeartbeatTimeout:
+// it should reflect the underlying activeChecker.isTimeout flag, defaulting
+// to false and becoming true when the flag is set.
+func TestIsHeartbeatTimeout(t *testing.T) {
+	proxy := &clientProxy{
+		client:        &SshUdpClient{},
+		serverChecker: newTimeoutChecker(0),
+	}
+	proxy.backendCond = sync.NewCond(&proxy.backendMutex)
+
+	client := &SshUdpClient{
+		clientProxy:    proxy,
+		connectTimeout: time.Second,
+		sessionMap:     make(map[uint64]*SshUdpSession),
+		channelMap:     make(map[string]chan ssh.NewChannel),
+	}
+	client.activeChecker = newTimeoutChecker(0)
+
+	// By default the checker is not in timeout.
+	if client.IsHeartbeatTimeout() {
+		t.Fatal("IsHeartbeatTimeout() should be false after construction")
+	}
+
+	// Manually set the flag (as proxy_test.go does) — simulates heartbeat expiry.
+	client.activeChecker.timeoutFlag.Store(true)
+	if !client.IsHeartbeatTimeout() {
+		t.Fatal("IsHeartbeatTimeout() should be true after timeoutFlag is set")
+	}
+
+	// Clearing the flag mirrors transport recovery.
+	client.activeChecker.timeoutFlag.Store(false)
+	if client.IsHeartbeatTimeout() {
+		t.Fatal("IsHeartbeatTimeout() should be false after timeoutFlag is cleared")
+	}
+}
