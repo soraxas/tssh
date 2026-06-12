@@ -97,12 +97,13 @@ type sshUdpClient struct {
 	// client across suspend: that connection has almost certainly died
 	// silently while the laptop was closed, so reusing it would hang or
 	// error -- repunch dials a fresh one each time instead.
-	punchUsed        bool
-	serverPid        int
-	punchParam       *sshParam
-	repunchMutex     sync.Mutex
-	repunchFailedAuth atomic.Bool // set when auth required; stops auto-repunch
-	transportMode    string // "KCP" or "QUIC" from serverInfo.Mode
+	punchUsed         bool
+	serverPid         int
+	punchParam        *sshParam
+	repunchMutex      sync.Mutex
+	repunchFailedAuth atomic.Bool   // set when auth required; stops auto-repunch
+	repunchStatusMsg  atomic.Pointer[string] // shown in the notif box during repunch
+	transportMode     string // "KCP" or "QUIC" from serverInfo.Mode
 }
 
 type detachableWriter struct {
@@ -213,6 +214,15 @@ func isRepunchAuthError(err error) bool {
 //
 // nonInteractive=false (manual ~r) keeps interactive auth; pubkey+agent is
 // seamless and keyboard-interactive/password prompts are shown to the user.
+// setRepunchStatus stores a short status string that shows in the
+// connection-lost notification box instead of being printed to raw stderr.
+// Pass nil to clear (restores the default "trying to reconnect" message).
+func (c *sshUdpClient) setRepunchStatus(msg *string) {
+	c.repunchStatusMsg.Store(msg)
+}
+
+func repunchMsg(s string) *string { return &s }
+
 func (c *sshUdpClient) triggerRepunch(nonInteractive bool) error {
 	if !c.punchUsed {
 		return fmt.Errorf("hole punching is not active for this session")
@@ -232,9 +242,16 @@ func (c *sshUdpClient) triggerRepunch(nonInteractive bool) error {
 	if nonInteractive {
 		prefix = "[auto-repunch]"
 	}
-	step := func(msg string) { fmt.Fprintf(os.Stderr, "\r\n\033[0;36m%s\033[0m %s", prefix, msg) }
+	// Display progress inside the connection-lost notification box so we
+	// don't corrupt the terminal while the overlay is visible. Falls back
+	// to plain stderr when there is no notification (non-interactive TTY).
+	step := func(msg string) {
+		s := fmt.Sprintf("%s %s", prefix, msg)
+		c.setRepunchStatus(repunchMsg(s))
+	}
 	fail := func(label string, err error) error {
-		fmt.Fprintf(os.Stderr, "\r\n\033[0;31m%s FAILED at %s: %v\033[0m\r\n", prefix, label, err)
+		s := fmt.Sprintf("%s FAILED at %s: %v", prefix, label, err)
+		c.setRepunchStatus(repunchMsg(s))
 		return err
 	}
 
@@ -253,6 +270,7 @@ func (c *sshUdpClient) triggerRepunch(nonInteractive bool) error {
 	if err != nil {
 		_ = punch.conn.Close()
 		if nonInteractive && isRepunchAuthError(err) {
+			c.setRepunchStatus(nil)
 			return errRepunchAuthRequired
 		}
 		return fail("re-dial SSH", fmt.Errorf("re-dial SSH failed: %v", err))
@@ -261,42 +279,40 @@ func (c *sshUdpClient) triggerRepunch(nonInteractive bool) error {
 
 	tsshdPath := getTsshdPath(c.punchParam.args)
 	cmd := fmt.Sprintf(" --repunch %d --punch %s", c.serverPid, punch.publicEndpoint)
-	step(fmt.Sprintf("running: tsshd%s", cmd))
+	step(fmt.Sprintf("running: tsshd --repunch %d --punch %s", c.serverPid, punch.publicEndpoint))
 	output, err := execTsshdCommand(tcpClient, tsshdPath, cmd)
 	if err != nil {
 		_ = punch.conn.Close()
 		return fail("tsshd --repunch", fmt.Errorf("run tsshd --repunch failed: %v", err))
 	}
 	outputStr := strings.TrimSpace(string(output))
-	step(fmt.Sprintf("server response: %q", outputStr))
 	if !bytes.HasPrefix(bytes.TrimSpace(output), []byte("OK")) {
 		_ = punch.conn.Close()
 		return fail("server repunch", fmt.Errorf("tsshd repunch error: %s", outputStr))
 	}
 
-	step("injecting new socket into UDP transport and kicking reconnect...")
+	step("injecting new UDP socket and waiting for transport to resume...")
 	if err := c.SshUdpClient.RefreshHolePunch(punch.conn); err != nil {
 		_ = punch.conn.Close()
 		return fail("RefreshHolePunch", fmt.Errorf("refresh local hole-punch socket failed: %v", err))
 	}
-	step("socket injected — monitoring reconnect...\r\n")
 
 	go func() {
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond)
 			if time.Since(time.UnixMilli(c.SshUdpClient.GetLastActiveTime())) < c.reconnectTimeout {
-				fmt.Fprintf(os.Stderr, "\r\n\033[0;32m[repunch] transport reconnected!\033[0m\r\n")
+				c.setRepunchStatus(nil) // restores normal "reconnected" message
 				return
 			}
 			if err := c.SshUdpClient.GetLastReconnectError(); err != nil {
-				fmt.Fprintf(os.Stderr, "\r\033[0;33m[repunch] reconnect attempt failed: %v\033[0m\x1b[K", err)
+				step(fmt.Sprintf("reconnect attempt error: %v", err))
 			} else {
-				fmt.Fprintf(os.Stderr, "\r\033[0;36m[repunch] waiting... (last active %v ago)\033[0m\x1b[K",
-					time.Since(time.UnixMilli(c.SshUdpClient.GetLastActiveTime())).Round(time.Second))
+				elapsed := time.Since(time.UnixMilli(c.SshUdpClient.GetLastActiveTime())).Round(time.Second)
+				step(fmt.Sprintf("waiting for server response... (offline %v)", elapsed))
 			}
 		}
-		fmt.Fprintf(os.Stderr, "\r\n\033[0;31m[repunch] timed out waiting for reconnect after 30s\033[0m\r\n")
+		c.setRepunchStatus(repunchMsg(fmt.Sprintf("%s timed out waiting for transport to resume after 30s", prefix)))
 	}()
 
 	return nil
@@ -354,6 +370,9 @@ func (c *sshUdpClient) udpKeepAlive() {
 }
 
 func (c *sshUdpClient) getConnLostStatus() string {
+	if msg := c.repunchStatusMsg.Load(); msg != nil {
+		return *msg
+	}
 	base := fmt.Sprintf("Oops, looks like the connection to the server was lost, trying to reconnect for %d/%d seconds.",
 		time.Since(time.UnixMilli(c.GetLastActiveTime()))/time.Second, c.aliveTimeout/time.Second)
 	if c.punchUsed {

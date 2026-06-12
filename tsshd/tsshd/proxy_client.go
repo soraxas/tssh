@@ -296,6 +296,7 @@ func (p *clientProxy) renewTcpPath(proxyClient *SshUdpClient, connectTimeout tim
 		return nil, fmt.Errorf("proxy auth failed")
 	}
 	p.client.debug("serial number [%d] auth success", p.serialNumber)
+	p.serverChecker.updateNow()
 
 	_ = setReadDeadline(time.Time{})
 
@@ -357,6 +358,10 @@ func (p *clientProxy) renewUdpPath(proxyClient *SshUdpClient, connectTimeout tim
 			}
 			if p.isAuthSuccessful(buffer[:n]) {
 				p.client.debug("serial number [%d] auth success", p.serialNumber)
+				// The auth ack proves the server is reachable; update the
+				// server-checker now so waitReconnect returns immediately
+				// instead of timing out when the server has nothing cached.
+				p.serverChecker.updateNow()
 				done <- nil
 				return
 			}
